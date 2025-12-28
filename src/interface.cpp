@@ -3,9 +3,10 @@
 #include <pybind11/numpy.h> // py::array_t
 #include <opencv2/opencv.hpp>
 
-#include "infer/sam3infer.hpp" 
+#include "infer/sam3infer.hpp"
+#include "infer/sam3_tracker.hpp"
 #include "common/object.hpp"
-#include "osd/osd.hpp" // 【新增】包含 OSD 头文件
+#include "osd/osd.hpp" // 【新増】包含 OSD 头文件
 
 namespace py = pybind11;
 
@@ -150,9 +151,9 @@ PYBIND11_MODULE(trtsam3, m)
             }, 
             py::arg("inputs"), py::arg("return_mask") = false);
 
-    // --- 【新增】OSD 函数绑定 ---
-    
-    // 1. 基础 OSD (绘制检测框)
+    // --- 【新増】OSD 函数绑定 ---
+
+    // 1. 基础 OSD (绘制検出框)
     // 注意：osd 是原地修改图像，为了方便 Python 使用，我们返回修改后的图像
     m.def("osd", [](py::array_t<uint8_t> &img, const std::vector<object::DetectionBox> &boxes, bool osd_rect, double font_scale_ratio) {
         cv::Mat mat = numpy_to_mat(img);
@@ -161,4 +162,103 @@ PYBIND11_MODULE(trtsam3, m)
         return img; // 返回原 numpy 数组以便链式调用
     }, py::arg("image"), py::arg("boxes"), py::arg("osd_rect") = true, py::arg("font_scale_ratio") = 0.04,
        "Draw detection boxes, labels and masks on the image in-place.");
+
+    // --- 【新増】Sam3Tracker 追跡クラス绑定 ---
+
+    // TrackedObject 結構
+    py::class_<sam3::TrackedObject>(m, "TrackedObject")
+        .def(py::init<>())
+        .def_readwrite("object_id", &sam3::TrackedObject::object_id)
+        .def_readwrite("class_name", &sam3::TrackedObject::class_name)
+        .def_readwrite("last_score", &sam3::TrackedObject::last_score)
+        .def_readwrite("pointer", &sam3::TrackedObject::pointer)
+        .def_readwrite("last_bbox", &sam3::TrackedObject::last_bbox)
+        .def_readwrite("is_active", &sam3::TrackedObject::is_active)
+        .def_readwrite("last_seen_frame", &sam3::TrackedObject::last_seen_frame)
+        .def("__repr__", [](const sam3::TrackedObject &obj) {
+            return "<TrackedObject id=" + std::to_string(obj.object_id) +
+                   " class='" + obj.class_name + "' active=" + (obj.is_active ? "true" : "false") + ">";
+        });
+
+    // TrackingResult 結構
+    py::class_<sam3::TrackingResult>(m, "TrackingResult")
+        .def(py::init<>())
+        .def_readwrite("frame_id", &sam3::TrackingResult::frame_id)
+        .def_readwrite("object_id", &sam3::TrackingResult::object_id)
+        .def_readwrite("class_name", &sam3::TrackingResult::class_name)
+        .def_readwrite("confidence", &sam3::TrackingResult::confidence)
+        .def_readwrite("bbox", &sam3::TrackingResult::bbox)
+        .def_property("mask",
+            [](sam3::TrackingResult &self) { return mat_to_numpy(self.mask); },
+            [](sam3::TrackingResult &self, py::array_t<uint8_t> array) {
+                self.mask = numpy_to_mat(array).clone();
+            })
+        .def_readwrite("is_new", &sam3::TrackingResult::is_new)
+        .def("__repr__", [](const sam3::TrackingResult &r) {
+            return "<TrackingResult frame=" + std::to_string(r.frame_id) +
+                   " obj_id=" + std::to_string(r.object_id) +
+                   " class='" + r.class_name + "' conf=" + std::to_string(r.confidence) + ">";
+        });
+
+    // MemoryBankConfig 結構
+    py::class_<sam3::MemoryBankConfig>(m, "MemoryBankConfig")
+        .def(py::init<>())
+        .def_readwrite("max_recent_frames", &sam3::MemoryBankConfig::max_recent_frames)
+        .def_readwrite("max_prompted_frames", &sam3::MemoryBankConfig::max_prompted_frames)
+        .def_readwrite("max_objects_per_frame", &sam3::MemoryBankConfig::max_objects_per_frame)
+        .def_readwrite("memory_channels", &sam3::MemoryBankConfig::memory_channels)
+        .def_readwrite("memory_height", &sam3::MemoryBankConfig::memory_height)
+        .def_readwrite("memory_width", &sam3::MemoryBankConfig::memory_width)
+        .def_readwrite("pointer_dim", &sam3::MemoryBankConfig::pointer_dim);
+
+    // Sam3TrackerConfig 結構
+    py::class_<sam3::Sam3TrackerConfig>(m, "Sam3TrackerConfig")
+        .def(py::init<>())
+        .def_readwrite("vision_encoder_path", &sam3::Sam3TrackerConfig::vision_encoder_path)
+        .def_readwrite("text_encoder_path", &sam3::Sam3TrackerConfig::text_encoder_path)
+        .def_readwrite("geometry_encoder_path", &sam3::Sam3TrackerConfig::geometry_encoder_path)
+        .def_readwrite("decoder_path", &sam3::Sam3TrackerConfig::decoder_path)
+        .def_readwrite("memory_encoder_path", &sam3::Sam3TrackerConfig::memory_encoder_path)
+        .def_readwrite("memory_attention_path", &sam3::Sam3TrackerConfig::memory_attention_path)
+        .def_readwrite("gpu_id", &sam3::Sam3TrackerConfig::gpu_id)
+        .def_readwrite("detection_threshold", &sam3::Sam3TrackerConfig::detection_threshold)
+        .def_readwrite("tracking_threshold", &sam3::Sam3TrackerConfig::tracking_threshold)
+        .def_readwrite("match_iou_threshold", &sam3::Sam3TrackerConfig::match_iou_threshold)
+        .def_readwrite("max_lost_frames", &sam3::Sam3TrackerConfig::max_lost_frames)
+        .def_readwrite("memory_config", &sam3::Sam3TrackerConfig::memory_config);
+
+    // Sam3Tracker クラス
+    py::class_<sam3::Sam3Tracker, std::shared_ptr<sam3::Sam3Tracker>>(m, "Sam3Tracker")
+        .def_static("create_instance", &sam3::Sam3Tracker::create_instance,
+            py::arg("config"),
+            "Create a Sam3Tracker instance with the given configuration.")
+        .def("initialize",
+            [](sam3::Sam3Tracker &self, py::array_t<uint8_t> &first_frame,
+               const std::vector<Sam3PromptUnit> &prompts, float conf_threshold) {
+                cv::Mat mat = numpy_to_mat(first_frame).clone();
+                py::gil_scoped_release release;
+                return self.initialize(mat, prompts, conf_threshold);
+            },
+            py::arg("first_frame"), py::arg("prompts"), py::arg("confidence_threshold") = 0.5f,
+            "Initialize the tracker with the first frame and prompts.")
+        .def("track_frame",
+            [](sam3::Sam3Tracker &self, py::array_t<uint8_t> &frame) {
+                cv::Mat mat = numpy_to_mat(frame).clone();
+                py::gil_scoped_release release;
+                return self.track_frame(mat);
+            },
+            py::arg("frame"),
+            "Track objects in the given frame. Returns a list of TrackingResult.")
+        .def("add_prompt", &sam3::Sam3Tracker::add_prompt,
+            py::arg("prompt"),
+            "Add a new prompt to track.")
+        .def("remove_object", &sam3::Sam3Tracker::remove_object,
+            py::arg("object_id"),
+            "Remove an object from tracking.")
+        .def("get_tracked_object_ids", &sam3::Sam3Tracker::get_tracked_object_ids,
+            "Get list of currently tracked object IDs.")
+        .def("get_tracked_objects", &sam3::Sam3Tracker::get_tracked_objects,
+            "Get list of currently tracked objects.")
+        .def("reset", &sam3::Sam3Tracker::reset,
+            "Reset the tracker state.");
 }
